@@ -1,7 +1,7 @@
 import json
 from langchain_openai import ChatOpenAI
 from langchain_experimental.agents.agent_toolkits import create_pandas_dataframe_agent
-
+import re
 PROMPT_TEMPLATE = """
 你是一位数据分析助手。请按照以下步骤执行：
 
@@ -10,31 +10,35 @@ PROMPT_TEMPLATE = """
 2. 行动：使用 python_repl_ast 工具执行代码
 3. 观察：查看代码执行结果
 4. 重复1-3步直到获得完整答案
-5. 最终答案：在最后一步返回JSON格式结果
+5. 最终答案：在最后一步返回JSON格式结果，并在JSON前加上 `Final Answer:`
 
-返回结果时必须严格按照以下JSON格式：
-
-对于文字回答：
-{"answer": "你的答案"}
-
-对于表格：
-{"table": {"columns": ["列1", "列2"], "data": [["值1", "值2"]]}}
-
-对于条形图：
-{"bar": {"columns": ["A", "B"], "data": [25, 40]}}
-
-对于折线图：
-{"line": {"columns": ["A", "B"], "data": [25, 40]}}
-
-对于散点图：
-{"scatter": {"columns": ["A", "B"], "data": [25, 40]}}
-
-重要要求：
-- 只能在最后一步返回JSON格式
+**重要规则：**
+- 在思考过程中绝对不要返回JSON格式
+- 只有在最终答案时才返回JSON，并且必须以 `Final Answer:` 开头
 - 所有回答内容必须使用中文
 - 列名和说明文字也要用中文
 
-用户请求："""
+**JSON格式要求（仅在最后一步使用）：**
+
+对于文字回答：
+{{"answer": "你的答案"}}
+
+对于表格：
+{{"table": {{"columns": ["列1", "列2"], "data": [["值1", "值2"]]}}}}
+
+对于条形图：
+{{"bar": {{"columns": ["A", "B"], "data": [25, 40]}}}}
+
+对于折线图：
+{{"line": {{"columns": ["A", "B"], "data": [25, 40]}}}}
+
+对于散点图：
+{{"scatter": {{"columns": ["A", "B"], "data": [25, 40]}}}}
+
+**当前任务：**
+用户请求：{query}
+
+请开始执行，记住：只有在最后一步才能返回JSON，并且必须以 `Final Answer:` 开头！"""
 
 def dataframe_agent(deepseek_api_key,df,query):#对请求进行封装
     model = ChatOpenAI(model="deepseek-chat",
@@ -45,25 +49,16 @@ def dataframe_agent(deepseek_api_key,df,query):#对请求进行封装
     agent=create_pandas_dataframe_agent(llm=model,
                                         df=df,
                                         allow_dangerous_code=True,
-                                        agent_executor_kwargs={"handle_parsing_errors": True},#模型自行处理错误
-                                        verbose=True)#看执行过程
-    prompt = PROMPT_TEMPLATE + query
-    response = agent.invoke({"input": prompt})
-    # 从输出中提取JSON部分
-    output = response["output"]
+                                        max_iterations=10,
+                                        early_stopping_method="force",
+                                        verbose=True,
+                                        handle_parsing_errors=True)#看执行过程
+    prompt = PROMPT_TEMPLATE.format(query=query)
+    try:
+       response = agent.invoke({"input": prompt}, handle_parsing_errors=True)
+       output = response["output"]
+       return {"raw_output": output}
 
-    # 查找JSON格式的响应
-    import re
-    json_match = re.search(r'\{.*\}', output, re.DOTALL)
-
-    if json_match:
-        try:
-            response_dict = json.loads(json_match.group())
-            return response_dict
-        except json.JSONDecodeError:
-            # 如果JSON解析失败，返回原始输出
-            return {"answer": output}
-    else:
-        # 如果没有找到JSON，返回整个输出
-        return {"answer": output}
-
+    except Exception as e:
+        print(f"Agent执行错误: {e}")
+        return {"answer": f"处理请求时发生错误：{str(e)}"}
